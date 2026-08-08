@@ -3229,14 +3229,8 @@ internal static class DialogueManagerUpdatePatch
         SetInjectedSettingsRowActive(_textInputKeyRow, controlsVisible);
         SetInjectedSettingsRowActive(_voiceInputKeyRow, controlsVisible);
 
-        if (!controlsVisible && _keyBindingTarget != 0)
-        {
-            _keyBindingTarget = 0;
-            _keyBindingStartedAt = -1f;
-            RebindingHeldVirtualKeys.Clear();
-            UpdateKeyBindingTexts();
-            Plugin.PluginLog.LogInfo("Key rebinding cancelled because the Controls settings tab was closed.");
-        }
+        if (!controlsVisible)
+            CancelSettingsKeyBinding("the Controls settings tab was closed");
         return controlsVisible;
     }
 
@@ -3330,6 +3324,17 @@ internal static class DialogueManagerUpdatePatch
         Plugin.PluginLog.LogInfo(target == 1
             ? "Waiting for a new text input hotkey from the new settings UI."
             : "Waiting for a new push-to-talk hotkey from the new settings UI.");
+    }
+
+    internal static void CancelSettingsKeyBinding(string reason)
+    {
+        var wasCapturing = _keyBindingTarget != 0;
+        _keyBindingTarget = 0;
+        _keyBindingStartedAt = -1f;
+        RebindingHeldVirtualKeys.Clear();
+        UpdateKeyBindingTexts();
+        if (wasCapturing)
+            Plugin.PluginLog.LogInfo($"Key rebinding cancelled because {reason}.");
     }
 
     internal static bool IsNewSettingsKeyBindingActive(int target) => _keyBindingTarget == target;
@@ -6670,16 +6675,20 @@ internal static class NewTraySettingsAdapter
 
     internal static void Update()
     {
-        DialogueManagerUpdatePatch.UpdateNewSettingsKeyBindingCapture();
-        if (Time.unscaledTime < _nextScanAt)
-        {
-            RefreshVisibleRows();
-            return;
-        }
-        _nextScanAt = Time.unscaledTime + 0.25f;
-
         try
         {
+            if (IsControlsViewVisible(_view))
+                DialogueManagerUpdatePatch.UpdateNewSettingsKeyBindingCapture();
+            else
+                DialogueManagerUpdatePatch.CancelSettingsKeyBinding("the new Controls settings view is not visible");
+
+            if (Time.unscaledTime < _nextScanAt)
+            {
+                RefreshVisibleRows();
+                return;
+            }
+            _nextScanAt = Time.unscaledTime + 0.25f;
+
             var view = FindView();
             if (view == null)
             {
@@ -6719,9 +6728,18 @@ internal static class NewTraySettingsAdapter
         }
         catch (Exception exception)
         {
+            DialogueManagerUpdatePatch.CancelSettingsKeyBinding("the new settings UI became unavailable");
             Plugin.PluginLog.LogWarning($"Could not update the new tray settings UI: {exception.Message}");
             _nextScanAt = Time.unscaledTime + 3f;
         }
+    }
+
+    private static bool IsControlsViewVisible(TraySettingNewView? view)
+    {
+        return view != null
+            && view.gameObject != null
+            && view.IsVisible
+            && view._currentTab == TraySettingTab.Controls;
     }
 
     private static TraySettingNewView? FindView()
@@ -7019,6 +7037,7 @@ internal static class NewTraySettingsAdapter
 
     private static void ResetView()
     {
+        DialogueManagerUpdatePatch.CancelSettingsKeyBinding("the new settings view was reset");
         _view = null;
         _tab = null;
         ResetRows();
