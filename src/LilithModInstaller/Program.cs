@@ -55,6 +55,7 @@ internal sealed class InstallerForm : Form
 {
     private const string AppId = "4643090";
     private const string DefaultManifestUrl = "https://github.com/mimimi6666/Lilith-AI-Mod/releases/download/v0.1.1-rc4/release-manifest.json";
+    private const string VoiceRuntimeReadySchema = "voice-runtime-v2";
     private readonly bool _zhTraditional;
     private readonly bool _zhSimplified;
     private readonly bool _japanese;
@@ -459,14 +460,20 @@ internal sealed class InstallerForm : Form
     private async Task PrepareVoiceRuntimeAsync(string runtime)
     {
         var ready = Path.Combine(runtime, ".ready");
-        if (File.Exists(ready)) return;
+        var temporaryReady = ready + ".tmp";
         var uv = Path.Combine(runtime, "uv.exe");
         var requirements = Path.Combine(runtime, "requirements-inference.txt");
+        var pythonDirectory = Path.Combine(runtime, "python");
+        var python = Path.Combine(pythonDirectory, "Scripts", "python.exe");
+        if (File.Exists(temporaryReady))
+            File.Delete(temporaryReady);
+        if (await IsVoiceRuntimeReadyAsync(runtime, ready, uv, requirements, python))
+            return;
+        if (File.Exists(ready))
+            File.Delete(ready);
         if (!File.Exists(uv) || !File.Exists(requirements))
             throw new FileNotFoundException("The dynamic voice package is incomplete (uv.exe or requirements-inference.txt is missing).");
-        var pythonDirectory = Path.Combine(runtime, "python");
         SetStatus(L("正在準備獨立 Python 語音環境…", "正在准备独立 Python 语音环境…", "独立Python音声環境を準備中…", "Preparing the isolated Python voice environment…"));
-        var python = Path.Combine(pythonDirectory, "Scripts", "python.exe");
         if (!File.Exists(python))
             await RunProcessWithRetryAsync(uv, $"venv \"{pythonDirectory}\" --python 3.10 --python-preference managed --relocatable", runtime);
         if (!File.Exists(python))
@@ -484,8 +491,75 @@ internal sealed class InstallerForm : Form
         var nltkData = Path.Combine(pythonDirectory, "nltk_data");
         Directory.CreateDirectory(nltkData);
         await RunProcessWithRetryAsync(python, $"-m nltk.downloader -d \"{nltkData}\" averaged_perceptron_tagger_eng cmudict", runtime);
+        await ValidateVoiceRuntimeDependenciesAsync(runtime, uv, python);
+        WriteVoiceRuntimeReadyMarker(ready, temporaryReady);
+    }
+
+    private static async Task<bool> IsVoiceRuntimeReadyAsync(
+        string runtime, string ready, string uv, string requirements, string python)
+    {
+        if (!File.Exists(ready))
+            return false;
+        try
+        {
+            var missingFiles = new[] { uv, requirements, python }
+                .Where(path => !File.Exists(path))
+                .Select(Path.GetFileName)
+                .ToArray();
+            if (missingFiles.Length > 0)
+            {
+                await LogVoiceRuntimeRepairReasonAsync(runtime,
+                    $"required file(s) missing: {string.Join(", ", missingFiles)}");
+                return false;
+            }
+            var markerLines = File.ReadAllLines(ready, Encoding.UTF8);
+            if (markerLines.Length != 2
+                || !string.Equals(markerLines[0].Trim(), VoiceRuntimeReadySchema, StringComparison.Ordinal)
+                || !DateTimeOffset.TryParseExact(markerLines[1].Trim(), "O", CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind, out _))
+            {
+                await LogVoiceRuntimeRepairReasonAsync(runtime, "the readiness marker is obsolete or malformed");
+                return false;
+            }
+            await ValidateVoiceRuntimeDependenciesAsync(runtime, uv, python);
+            return true;
+        }
+        catch (Exception exception)
+        {
+            await LogVoiceRuntimeRepairReasonAsync(runtime, exception.Message);
+            return false;
+        }
+    }
+
+    private static Task LogVoiceRuntimeRepairReasonAsync(string runtime, string reason)
+    {
+        var log = Path.Combine(runtime, "voice-runtime-install.log");
+        return File.AppendAllTextAsync(log,
+            $"Existing voice runtime validation failed; repairing because {reason}.\n",
+            new UTF8Encoding(false));
+    }
+
+    private static async Task ValidateVoiceRuntimeDependenciesAsync(string runtime, string uv, string python)
+    {
         await RunProcessAsync(uv, $"pip check --python \"{python}\"", runtime);
-        File.WriteAllText(ready, DateTimeOffset.Now.ToString("O"));
+        const string script = "import torch, torchaudio, nltk; nltk.data.find('taggers/averaged_perceptron_tagger_eng'); nltk.data.find('corpora/cmudict')";
+        await RunProcessAsync(python, $"-c \"{script}\"", runtime);
+    }
+
+    private static void WriteVoiceRuntimeReadyMarker(string ready, string temporaryReady)
+    {
+        try
+        {
+            File.WriteAllText(temporaryReady,
+                $"{VoiceRuntimeReadySchema}{Environment.NewLine}{DateTimeOffset.Now:O}{Environment.NewLine}",
+                new UTF8Encoding(false));
+            File.Move(temporaryReady, ready, true);
+        }
+        finally
+        {
+            if (File.Exists(temporaryReady))
+                File.Delete(temporaryReady);
+        }
     }
 
     private static async Task RunProcessWithRetryAsync(string file, string arguments, string workingDirectory, int maxAttempts = 3)
